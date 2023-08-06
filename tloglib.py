@@ -13,8 +13,11 @@ How to use the module?
 class DebugPrintf:
     @staticmethod
     def print(msg):
-        line = b''.join(msg[3:]).decode('utf-8')
-        print(f'[DEBUG_TX]\n>>>>>\n{line}\n<<<<<')
+        if msg[0] == b'\x00':
+            line = b''.join(msg[3:]).decode('utf-8')
+            print(f'[DEBUG_TX]\n>>>>>\n{line}\n<<<<<')
+        else:
+            print(msg)
 
 class TransportLayer:
     WAIT_FOR_SOH = 0
@@ -45,6 +48,20 @@ class TransportLayer:
                 self._length = 0
                 self._state = TransportLayer.WAIT_FOR_SOH                    
 
+class Command:
+    def __init__(self):
+        self.tx_data = None
+
+class CommandRegistry:
+    def __init__(self):
+        get_status_cmd = Command()
+        get_status_cmd.tx_data = b'\x00\x00'
+        self._commands = {
+            "GetStatus": get_status_cmd
+        }
+
+    def get(self, command:str):
+        return self._commands[command]
 
 class ThreadControl:
     def __init__(self):
@@ -54,6 +71,7 @@ class ThreadControl:
         self._read_thread = None
         self._write_thread = None
         self._transport_layer = TransportLayer()
+        self._command:Command = None
 
     def set_threads(self, read_thread, write_thread):
         self._read_thread = read_thread
@@ -92,6 +110,12 @@ class ThreadControl:
     
     def get_write_command(self):
         return self._command.tx_data
+    
+    def trigger_command(self, cmd: Command):
+        if not self._command:
+            self._command = cmd
+        else:
+            print("Previous command pending, please wait...")
 
 
 def read_data(dev:serial.Serial, control:ThreadControl):
@@ -117,6 +141,7 @@ def write_data(dev:serial.Serial, control:ThreadControl):
 class App:
     def __init__(self):
         self._thread_control = None
+        self._command_regisrty = CommandRegistry()
 
     def start(self):
         device = serial.Serial("COM6", 112500)
@@ -133,7 +158,11 @@ class App:
     def stop(self):
         self._thread_control.exit()
 
+    def get_status(self):
+        self._thread_control.trigger_command(self._command_regisrty.get("GetStatus"))
 
+
+# Only for testing
 if __name__ == "__main__":
     app = App()
     app.start()
