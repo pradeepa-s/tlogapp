@@ -10,6 +10,42 @@ How to use the module?
 - tloglib.stop() stops the server
 '''
 
+class DebugPrintf:
+    @staticmethod
+    def print(msg):
+        line = b''.join(msg[3:]).decode('utf-8')
+        print(f'[DEBUG_TX]\n>>>>>\n{line}\n<<<<<')
+
+class TransportLayer:
+    WAIT_FOR_SOH = 0
+    WAIT_FOR_DATA_LENGTH_LSB = 1
+    WAIT_FOR_DATA_LENGTH_MSB = 2
+    WAIT_FOR_DATA = 3
+
+    def __init__(self):
+        self._state = TransportLayer.WAIT_FOR_SOH
+        self._length = 0
+        self._data = []
+
+    def submit(self, data):
+        if self._state == TransportLayer.WAIT_FOR_SOH and data == b'\x01':
+            self._state = TransportLayer.WAIT_FOR_DATA_LENGTH_LSB
+        elif self._state == TransportLayer.WAIT_FOR_DATA_LENGTH_LSB:
+            self._length = int.from_bytes(data)
+            self._state = TransportLayer.WAIT_FOR_DATA_LENGTH_MSB
+        elif self._state == TransportLayer.WAIT_FOR_DATA_LENGTH_MSB:
+            self._length |= (int.from_bytes(data) << 8)
+            self._state = TransportLayer.WAIT_FOR_DATA
+        elif self._state == TransportLayer.WAIT_FOR_DATA and self._length > 0:
+            self._data.append(data)
+            self._length -= 1
+            if self._length == 0:                
+                DebugPrintf.print(self._data)
+                self._data = []
+                self._length = 0
+                self._state = TransportLayer.WAIT_FOR_SOH                    
+
+
 class ThreadControl:
     def __init__(self):
         self._is_enabled = True
@@ -17,7 +53,7 @@ class ThreadControl:
         self._device_lock = threading.Lock()
         self._read_thread = None
         self._write_thread = None
-        self._rx = []
+        self._transport_layer = TransportLayer()
 
     def set_threads(self, read_thread, write_thread):
         self._read_thread = read_thread
@@ -45,12 +81,7 @@ class ThreadControl:
         return self._device_lock
 
     def submit_rx_data(self, val):
-        if val == b'\n':
-            line = b''.join(self._rx)
-            print(line.decode('utf-8'))
-            self._rx = []
-        elif val != b'\r':
-            self._rx.append(val)
+        self._transport_layer.submit(val)
 
     def write_pending(self):
         return self._device_lock.locked()
