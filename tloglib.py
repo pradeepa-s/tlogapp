@@ -1,3 +1,4 @@
+import datetime
 import time
 import threading
 import serial
@@ -5,19 +6,31 @@ import serial
 '''
 How to use the module?
 
-- import the tloglib module
-- tloglib.start() starts the server that would read and write data to the device
-- tloglib.stop() stops the server
+import tloglib
+tlog = tloglib.App('COM6')
+tlog.start() starts the server that would read and write data to the device
+tlog.stop() stops the server
+
+tlog.get_status() reads status of device
 '''
 
 class DebugPrintf:
-    @staticmethod
-    def print(msg):
+    def __init__(self) -> None:
+        self._msg = []
+
+    def add(self, msg):
+        print(msg)
         if msg[0] == b'\x00':
             line = b''.join(msg[3:]).decode('utf-8')
-            print(f'[DEBUG_TX]\n>>>>>\n{line}\n<<<<<')
+            dt = datetime.datetime.now().isoformat()
+            self._msg.append(f"{dt}:\t{line}")
         else:
             print(msg)
+
+    def print(self):
+        msg = '\n'.join(self._msg)
+        print(msg)
+        self._msg = []
 
 class TransportLayer:
     WAIT_FOR_SOH = 0
@@ -25,10 +38,11 @@ class TransportLayer:
     WAIT_FOR_DATA_LENGTH_MSB = 2
     WAIT_FOR_DATA = 3
 
-    def __init__(self):
+    def __init__(self, dbg_print):
         self._state = TransportLayer.WAIT_FOR_SOH
         self._length = 0
         self._data = []
+        self._debug_print = dbg_print
 
     def submit(self, data):
         if self._state == TransportLayer.WAIT_FOR_SOH and data == b'\x01':
@@ -43,7 +57,7 @@ class TransportLayer:
             self._data.append(data)
             self._length -= 1
             if self._length == 0:                
-                DebugPrintf.print(self._data)
+                self._debug_print.add(self._data)
                 self._data = []
                 self._length = 0
                 self._state = TransportLayer.WAIT_FOR_SOH                    
@@ -64,14 +78,16 @@ class CommandRegistry:
         return self._commands[command]
 
 class ThreadControl:
-    def __init__(self):
+    def __init__(self, dev):
         self._is_enabled = True
-        self._write_event = threading.Event()
+        self._write_event:threading.Event = threading.Event()
         self._device_lock = threading.Lock()
         self._read_thread = None
         self._write_thread = None
-        self._transport_layer = TransportLayer()
+        self._debug_print = DebugPrintf()
+        self._transport_layer = TransportLayer(self._debug_print)
         self._command:Command = None
+        self._device:serial.Serial = dev
 
     def set_threads(self, read_thread, write_thread):
         self._read_thread = read_thread
@@ -87,12 +103,14 @@ class ThreadControl:
     def exit(self):
         self._is_enabled = False
         self._write_event.set()
-
+        self._device.cancel_read()
         self._read_thread.join()
         self._write_thread.join()
 
     def wait_for_write(self):
         self._write_event.wait()
+        self._write_event.clear()
+        return True
 
     def acquire_device_for_write(self):
         self._device_lock.acquire()
@@ -114,6 +132,7 @@ class ThreadControl:
     def trigger_command(self, cmd: Command):
         if not self._command:
             self._command = cmd
+            self._write_event.set()
         else:
             print("Previous command pending, please wait...")
 
@@ -129,31 +148,32 @@ def read_data(dev:serial.Serial, control:ThreadControl):
 
 def write_data(dev:serial.Serial, control:ThreadControl):
     while control.wait_for_write():
-        if control.is_enabled():
+        if control.is_enabled():        
             lock = control.acquire_device_for_write()
             dev.cancel_read()            
-            command = control.get_write_command()
+            command_data = control.get_write_command()
+            command_length = len(command_data)
+            command = b'\x01' + command_length.to_bytes(2, 'little') + command_data
+            print(command)
             dev.write(command)
+            control._command = None
             lock.release()
         else:
             break
 
 class App:
-    def __init__(self):
+    def __init__(self, port):
         self._thread_control = None
         self._command_regisrty = CommandRegistry()
+        self._device = serial.Serial(port, 112500)
 
     def start(self):
-        device = serial.Serial("COM6", 112500)
+        self._thread_control = ThreadControl(self._device)
+        read_thread = threading.Thread(target=read_data, args=(self._device, self._thread_control))
+        write_thread = threading.Thread(target=write_data, args=(self._device, self._thread_control))
 
-        thread_control = ThreadControl()
-        read_thread = threading.Thread(target=read_data, args=(device, thread_control))
-        write_thread = threading.Thread(target=write_data, args=(device, thread_control))
-
-        thread_control.set_threads(read_thread, write_thread)
-        thread_control.start()
-
-        self._thread_control = thread_control
+        self._thread_control.set_threads(read_thread, write_thread)
+        self._thread_control.start()
 
     def stop(self):
         self._thread_control.exit()
@@ -161,11 +181,12 @@ class App:
     def get_status(self):
         self._thread_control.trigger_command(self._command_regisrty.get("GetStatus"))
 
+    def print(self):
+        self._thread_control._debug_print.print()
 
 # Only for testing
 if __name__ == "__main__":
-    app = App()
+    app = App('COM6')
     app.start()
-    time.sleep(10)
+    app.get_status()
     app.stop()
-    print("Done")
