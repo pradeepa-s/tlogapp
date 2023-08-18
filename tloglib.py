@@ -18,19 +18,58 @@ class DebugPrintf:
     def __init__(self) -> None:
         self._msg = []
 
-    def add(self, msg):
-        print(msg)
-        if msg[0] == b'\x00':
-            line = b''.join(msg[3:]).decode('utf-8')
-            dt = datetime.datetime.now().isoformat()
-            self._msg.append(f"{dt}:\t{line}")
-        else:
-            print(msg)
+    def add(self, msg:bytearray):
+        line = b''.join(msg[2:]).decode('utf-8')
+        dt = datetime.datetime.now().isoformat()
+        self._msg.append(f"{dt}:\t{line}")
 
     def print(self):
         msg = '\n'.join(self._msg)
         print(msg)
         self._msg = []
+
+
+class CmdResponseReceiver:
+    def __init__(self) -> None:
+        self._response_decoders = {}
+
+    def register_decoder(self, cmd, cb):
+        self._response_decoders[cmd] = cb
+
+    def add(self, msg:bytearray):
+        cmd = int.from_bytes(msg[0:1], "little")
+        length = int.from_bytes(msg[1:2], "little")
+        rsp_decoder = self._response_decoders.get(cmd, None)
+        if rsp_decoder:
+            rsp_decoder(length, msg[3:])
+
+
+class GetStatusResponse:
+    def __init__(self) -> None:
+        pass
+
+    def decode(self, length, data):
+        dt = datetime.datetime(2000 + data[0], data[1], data[2], data[3], data[4], data[5])
+        temp = int.from_bytes(data[6:9], "little")
+        t_c = float(temp/10000)
+        print(f"GetStatus response: {dt}: {t_c} C")
+
+
+class ResponseRouter:
+    def __init__(self) -> None:
+        self._receivers = {}
+
+    def register_receiver(self, code:int, cb):
+        self._receivers[code] = cb
+
+    def submit_data(self, data:bytearray):
+        code = int.from_bytes(data[0:1], "little")
+        rx = self._receivers.get(code, None)
+        if rx:
+            rx(data[1:])
+        else:
+            print(f"Unhandled rx data {data}")
+        
 
 class TransportLayer:
     WAIT_FOR_SOH = 0
@@ -38,11 +77,15 @@ class TransportLayer:
     WAIT_FOR_DATA_LENGTH_MSB = 2
     WAIT_FOR_DATA = 3
 
-    def __init__(self, dbg_print):
+    def __init__(self, router:ResponseRouter):
+        # TODO: Get presentation layer
+        self._response_router = router
+        self._reset()
+
+    def _reset(self):
         self._state = TransportLayer.WAIT_FOR_SOH
         self._length = 0
-        self._data = []
-        self._debug_print = dbg_print
+        self._data:bytearray = bytearray()
 
     def submit(self, data):
         if self._state == TransportLayer.WAIT_FOR_SOH and data == b'\x01':
@@ -54,13 +97,11 @@ class TransportLayer:
             self._length |= (int.from_bytes(data) << 8)
             self._state = TransportLayer.WAIT_FOR_DATA
         elif self._state == TransportLayer.WAIT_FOR_DATA and self._length > 0:
-            self._data.append(data)
+            self._data += bytearray(data)
             self._length -= 1
             if self._length == 0:                
-                self._debug_print.add(self._data)
-                self._data = []
-                self._length = 0
-                self._state = TransportLayer.WAIT_FOR_SOH                    
+                self._response_router.submit_data(self._data)
+                self._reset()                  
 
 class Command:
     def __init__(self):
@@ -69,7 +110,7 @@ class Command:
 class CommandRegistry:
     def __init__(self):
         get_status_cmd = Command()
-        get_status_cmd.tx_data = b'\x00\x00'
+        get_status_cmd.tx_data = b'\x01\x00\x00\x00'
         self._commands = {
             "GetStatus": get_status_cmd
         }
@@ -85,7 +126,16 @@ class ThreadControl:
         self._read_thread = None
         self._write_thread = None
         self._debug_print = DebugPrintf()
-        self._transport_layer = TransportLayer(self._debug_print)
+        self._cmd_response_rx = CmdResponseReceiver()
+
+        self._rx_router = ResponseRouter()
+        self._rx_router.register_receiver(0, self._debug_print.add)
+        self._rx_router.register_receiver(2, self._cmd_response_rx.add)
+
+        self._get_status_response = GetStatusResponse()
+        self._cmd_response_rx.register_decoder(0, self._get_status_response.decode)
+
+        self._transport_layer = TransportLayer(self._rx_router)
         self._command:Command = None
         self._device:serial.Serial = dev
 
@@ -165,9 +215,11 @@ class App:
     def __init__(self, port):
         self._thread_control = None
         self._command_regisrty = CommandRegistry()
-        self._device = serial.Serial(port, 112500)
+        self._port = port
+        self._device = None
 
     def start(self):
+        self._device = serial.Serial(self._port, 112500)
         self._thread_control = ThreadControl(self._device)
         read_thread = threading.Thread(target=read_data, args=(self._device, self._thread_control))
         write_thread = threading.Thread(target=write_data, args=(self._device, self._thread_control))
@@ -177,16 +229,26 @@ class App:
 
     def stop(self):
         self._thread_control.exit()
+        self._device.close()
+        self._device = None
 
     def get_status(self):
-        self._thread_control.trigger_command(self._command_regisrty.get("GetStatus"))
+        self._trigger_command("GetStatus")
 
     def print(self):
         self._thread_control._debug_print.print()
 
-# Only for testing
+    def _trigger_command(self, command):
+        cmd = self._command_regisrty.get(command)
+        self._thread_control.trigger_command(cmd)
+
+
 if __name__ == "__main__":
     app = App('COM6')
     app.start()
-    app.get_status()
-    app.stop()
+
+    import code
+    vars = globals().copy()
+    vars.update(locals())
+    shell = code.InteractiveConsole(vars)
+    shell.interact()
