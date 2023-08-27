@@ -2,6 +2,7 @@ import datetime
 import time
 import threading
 import serial
+import struct
 
 '''
 How to use the module?
@@ -38,10 +39,13 @@ class CmdResponseReceiver:
 
     def add(self, msg:bytearray):
         cmd = int.from_bytes(msg[0:1], "little")
-        length = int.from_bytes(msg[1:2], "little")
+        error = int.from_bytes(msg[2:2], "little")
+        length = int.from_bytes(msg[2:3], "little")
         rsp_decoder = self._response_decoders.get(cmd, None)
-        if rsp_decoder:
-            rsp_decoder(length, msg[3:])
+        if error:
+            print(f"Error: {error}")
+        elif rsp_decoder:
+            rsp_decoder(length, msg[4:])
 
 
 class GetStatusResponse:
@@ -54,6 +58,19 @@ class GetStatusResponse:
         t_c = float(temp/10000)
         print(f"GetStatus response: {dt}: {t_c} C")
 
+class SetDatetimeResponse:
+    def __init__(self) -> None:
+        pass
+
+    def decode(self, length, data):
+        year=2000 + data[0]
+        month=data[1]
+        day=data[2]
+        hour=data[3]
+        minute=data[4]
+        second=data[5]
+        dt = datetime.datetime(year=2000 + data[0], month=data[1], day=data[2], hour=data[3], minute=data[4], second=data[5])
+        print(f"SetDatetime response: {dt}")
 
 class ResponseRouter:
     def __init__(self) -> None:
@@ -104,19 +121,45 @@ class TransportLayer:
                 self._reset()                  
 
 class Command:
-    def __init__(self):
-        self.tx_data = None
+    def __init__(self, code):
+        self._command = code
+        self._params:bytes = b''
 
-class CommandRegistry:
+    def add_params(self, param):
+        raise NotImplementedError
+    
+    def serialize(self) -> bytes:
+        tx_data = b'\x01'
+        tx_data += self._command
+        tx_data += len(self._params).to_bytes(2, 'little')
+        tx_data += self._params
+        return tx_data
+
+class SetDatetimeCommand(Command):
+    def add_params(self, dt:datetime.datetime):
+        year = dt.year - 2000
+        self._params = struct.pack("BBBBBB", year, dt.month, dt.day,
+                                   dt.hour, dt.minute, dt.second)        
+
+class GetStatusCommand(Command):
+    def __init__(self, code):
+        super().__init__(code)
+
+class CommandBuilder:
     def __init__(self):
-        get_status_cmd = Command()
-        get_status_cmd.tx_data = b'\x01\x00\x00\x00'
         self._commands = {
-            "GetStatus": get_status_cmd
+            "GetStatus": b'\x00',
+            "SetDatetime": b'\x01'
         }
 
-    def get(self, command:str):
-        return self._commands[command]
+        self._command_builders = {
+            "GetStatus": GetStatusCommand,
+            "SetDatetime": SetDatetimeCommand
+        }
+
+    def get(self, command:str) -> Command:
+        cmd_code = self._commands[command]
+        return self._command_builders[command](cmd_code)
 
 class ThreadControl:
     def __init__(self, dev):
@@ -133,7 +176,9 @@ class ThreadControl:
         self._rx_router.register_receiver(2, self._cmd_response_rx.add)
 
         self._get_status_response = GetStatusResponse()
+        self._set_datetime_response = SetDatetimeResponse()
         self._cmd_response_rx.register_decoder(0, self._get_status_response.decode)
+        self._cmd_response_rx.register_decoder(1, self._set_datetime_response.decode)
 
         self._transport_layer = TransportLayer(self._rx_router)
         self._command:Command = None
@@ -177,7 +222,7 @@ class ThreadControl:
             pass
     
     def get_write_command(self):
-        return self._command.tx_data
+        return self._command.serialize()
     
     def trigger_command(self, cmd: Command):
         if not self._command:
@@ -214,7 +259,7 @@ def write_data(dev:serial.Serial, control:ThreadControl):
 class App:
     def __init__(self, port):
         self._thread_control = None
-        self._command_regisrty = CommandRegistry()
+        self._command_builder = CommandBuilder()
         self._port = port
         self._device = None
 
@@ -235,11 +280,20 @@ class App:
     def get_status(self):
         self._trigger_command("GetStatus")
 
+    def set_datetime_now(self):
+        dt = datetime.datetime.now()
+        self.set_datetime(dt)
+
+    def set_datetime(self, dt):
+        self._trigger_command("SetDatetime", params=dt)
+
     def print(self):
         self._thread_control._debug_print.print()
 
-    def _trigger_command(self, command):
-        cmd = self._command_regisrty.get(command)
+    def _trigger_command(self, command, params=None):
+        cmd = self._command_builder.get(command)
+        if params:
+            cmd.add_params(params)
         self._thread_control.trigger_command(cmd)
 
 
