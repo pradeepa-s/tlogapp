@@ -58,6 +58,7 @@ class GetStatusResponse:
         t_c = float(temp/10000)
         print(f"GetStatus response: {dt}: {t_c} C")
 
+
 class SetDatetimeResponse:
     def __init__(self) -> None:
         pass
@@ -71,6 +72,15 @@ class SetDatetimeResponse:
         second=data[5]
         dt = datetime.datetime(year=2000 + data[0], month=data[1], day=data[2], hour=data[3], minute=data[4], second=data[5])
         print(f"SetDatetime response: {dt}")
+
+
+class ChipEraseResponse:
+    def __init__(self) -> None:
+        pass
+
+    def decode(self, length, data):
+        print(f"Chip erase command completed")
+
 
 class ResponseRouter:
     def __init__(self) -> None:
@@ -145,16 +155,22 @@ class GetStatusCommand(Command):
     def __init__(self, code):
         super().__init__(code)
 
+class ChipEraseCommand(Command):
+    def __init__(self, code):
+        super().__init__(code)
+
 class CommandBuilder:
     def __init__(self):
         self._commands = {
             "GetStatus": b'\x00',
-            "SetDatetime": b'\x01'
+            "SetDatetime": b'\x01',
+            "ChipErase": b'\x02'
         }
 
         self._command_builders = {
             "GetStatus": GetStatusCommand,
-            "SetDatetime": SetDatetimeCommand
+            "SetDatetime": SetDatetimeCommand,
+            "ChipErase": ChipEraseCommand
         }
 
     def get(self, command:str) -> Command:
@@ -177,8 +193,10 @@ class ThreadControl:
 
         self._get_status_response = GetStatusResponse()
         self._set_datetime_response = SetDatetimeResponse()
+        self._chip_erase_response = ChipEraseResponse()
         self._cmd_response_rx.register_decoder(0, self._get_status_response.decode)
         self._cmd_response_rx.register_decoder(1, self._set_datetime_response.decode)
+        self._cmd_response_rx.register_decoder(2, self._chip_erase_response.decode)
 
         self._transport_layer = TransportLayer(self._rx_router)
         self._command:Command = None
@@ -286,6 +304,9 @@ class App:
 
     def set_datetime(self, dt):
         self._trigger_command("SetDatetime", params=dt)
+
+    def chip_erase(self):
+        self._trigger_command("ChipErase")
 
     def print(self):
         self._thread_control._debug_print.print()
