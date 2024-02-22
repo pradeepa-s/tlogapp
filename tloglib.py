@@ -82,6 +82,13 @@ class ChipEraseResponse:
         print(f"Chip erase command completed")
 
 
+class WriteTestDataResponse:
+    def __init__(self) -> None:
+        pass
+
+    def decode(self, length, data):
+        print(f"Write test data command completed")
+
 class ResponseRouter:
     def __init__(self) -> None:
         self._receivers = {}
@@ -159,18 +166,27 @@ class ChipEraseCommand(Command):
     def __init__(self, code):
         super().__init__(code)
 
+class WriteTestDataCommand(Command):
+    def add_params(self, param:tuple):
+        length = param[0]
+        delta = param[1]
+        self._params = struct.pack("HH", length, delta)
+
+
 class CommandBuilder:
     def __init__(self):
         self._commands = {
             "GetStatus": b'\x00',
             "SetDatetime": b'\x01',
-            "ChipErase": b'\x02'
+            "ChipErase": b'\x02',
+            "WriteTestData": b'\xA0'
         }
 
         self._command_builders = {
             "GetStatus": GetStatusCommand,
             "SetDatetime": SetDatetimeCommand,
-            "ChipErase": ChipEraseCommand
+            "ChipErase": ChipEraseCommand,
+            "WriteTestData": WriteTestDataCommand
         }
 
     def get(self, command:str) -> Command:
@@ -194,9 +210,11 @@ class ThreadControl:
         self._get_status_response = GetStatusResponse()
         self._set_datetime_response = SetDatetimeResponse()
         self._chip_erase_response = ChipEraseResponse()
-        self._cmd_response_rx.register_decoder(0, self._get_status_response.decode)
-        self._cmd_response_rx.register_decoder(1, self._set_datetime_response.decode)
-        self._cmd_response_rx.register_decoder(2, self._chip_erase_response.decode)
+        self._write_test_data_response = WriteTestDataResponse()
+        self._cmd_response_rx.register_decoder(0x00, self._get_status_response.decode)
+        self._cmd_response_rx.register_decoder(0x01, self._set_datetime_response.decode)
+        self._cmd_response_rx.register_decoder(0x02, self._chip_erase_response.decode)
+        self._cmd_response_rx.register_decoder(0xA0, self._write_test_data_response.decode)
 
         self._transport_layer = TransportLayer(self._rx_router)
         self._command:Command = None
@@ -302,11 +320,14 @@ class App:
         dt = datetime.datetime.now()
         self.set_datetime(dt)
 
-    def set_datetime(self, dt):
+    def set_datetime(self, dt:datetime):
         self._trigger_command("SetDatetime", params=dt)
 
     def chip_erase(self):
         self._trigger_command("ChipErase")
+
+    def write_test_data(self, length:int, t_delta_in_secs:int):
+        self._trigger_command("WriteTestData", params=(length, t_delta_in_secs))
 
     def print(self):
         self._thread_control._debug_print.print()
